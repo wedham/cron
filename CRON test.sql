@@ -4,11 +4,11 @@ SELECT * FROM [cron].[GetNextSchedule]('45 17 7 6 * ', 10)               --Every
 SELECT * FROM [cron].[GetNextSchedule]('*/15 */6 1,15,31 * 1-5', 20)     --At 00:00, 00:15, 00:30, 00:45, 06:00, 06:15, 06:30, 06:45, 12:00, 12:15, 12:30, 12:45, 18:00, 18:15, 18:30, 18:45, on 1st, 15th or  31st of each  month, but not on weekends
 SELECT * FROM [cron].[GetNextSchedule]('0 12 * * 1-5', 24)               --At midday on weekdays
 
-SELECT [cron].[GetPreviousSchedule]('* * * * *')              --Each minute
-SELECT [cron].[GetPreviousSchedule]('59 23 31 12 5')          --One minute  before the end of year if the last day of the year is Friday
-SELECT [cron].[GetPreviousSchedule]('45 17 7 6 * ')           --Every  year, on June 7th at 17:45 
-SELECT [cron].[GetPreviousSchedule]('*/15 */6 1,15,31 * 1-5') --At 00:00, 00:15, 00:30, 00:45, 06:00, 06:15, 06:30, 06:45, 12:00, 12:15, 12:30, 12:45, 18:00, 18:15, 18:30, 18:45, on 1st, 15th or  31st of each  month, but not on weekends
-SELECT [cron].[GetPreviousSchedule]('0 12 * * 1-5')           --At midday on weekdays
+SELECT * FROM [cron].[GetPreviousSchedule]('* * * * *')              --Each minute
+SELECT * FROM [cron].[GetPreviousSchedule]('59 23 31 12 5')          --One minute  before the end of year if the last day of the year is Friday
+SELECT * FROM [cron].[GetPreviousSchedule]('45 17 7 6 * ')           --Every  year, on June 7th at 17:45 
+SELECT * FROM [cron].[GetPreviousSchedule]('*/15 */6 1,15,31 * 1-5') --At 00:00, 00:15, 00:30, 00:45, 06:00, 06:15, 06:30, 06:45, 12:00, 12:15, 12:30, 12:45, 18:00, 18:15, 18:30, 18:45, on 1st, 15th or  31st of each  month, but not on weekends
+SELECT * FROM [cron].[GetPreviousSchedule]('0 12 * * 1-5')           --At midday on weekdays
 
 --*******************************************************************************************
 --*******************************************************************************************

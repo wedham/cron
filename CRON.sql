@@ -389,14 +389,13 @@ GO
 Date		Name				Description
 ----------	-------------		-----------------------------------------------
 2022-01-10	Mikael Wedham		+Created v1
+2022-01-11  Mikael Wedham       Changed return type to table for consistency when querying
 *******************************************************************************/
 CREATE OR ALTER FUNCTION [cron].[GetPreviousSchedule]
 (@cron varchar(255)) 
-RETURNS datetime
+RETURNS @result TABLE (scheduledtime datetime)
 AS
 BEGIN
-	DECLARE @previousschedule datetime
-
 	--Create writable cron
 	DECLARE @cronexpression varchar(255)
 	SET @cronexpression = [cron].[NormalizeExpression](@cron)
@@ -495,10 +494,12 @@ BEGIN
 	FROM allScheduledTimes
 	WHERE schedule < GETDATE()
 	ORDER BY schedule DESC)
-	SELECT @previousschedule = schedule
+
+	INSERT INTO @result(scheduledtime)
+	SELECT schedule
 	FROM PreviousSchedule
 
-RETURN  @previousschedule 
+	RETURN  
 
 END
 GO
