@@ -121,11 +121,13 @@ BEGIN
 	DECLARE @to int 
 
 	DECLARE @splitter int
+	DECLARE @splitter2 int
 	--Find the position of the '-' separator
 	SELECT @splitter = CHARINDEX('-', @cron)
+	SELECT @splitter2 = CHARINDEX('-', @cron, @splitter + 1)
 
 	--If separator is duplicated or missing, this is not a correct cron part : exit.
-	IF ( SELECT COUNT(*) FROM STRING_SPLIT(@cron, '-')) <> 2 OR (@splitter = 0)
+	IF (@splitter = 0) OR (@splitter2 > 0)
 	BEGIN
 	   RETURN
 	END
@@ -175,11 +177,13 @@ BEGIN
 	DECLARE @modulo int
 
 	DECLARE @splitter int
+	DECLARE @splitter2 int
 	--Find the position of the '/' separator
 	SELECT @splitter = CHARINDEX('/', @cron)
+	SELECT @splitter2 = CHARINDEX('/', @cron, @splitter + 1)
 
 	--If separator is duplicated or missing, this is not a correct cron part : exit.
-	IF ( SELECT COUNT(*) FROM STRING_SPLIT(@cron, '/')) <> 2 OR (@splitter = 0)
+	IF (@splitter = 0) OR (@splitter2 > 0)
 	BEGIN
 	   RETURN
 	END
@@ -305,7 +309,26 @@ AS
 BEGIN
  --Unsorted list of parts in one segment
  DECLARE @parts TABLE (segment varchar(255))
- INSERT INTO @parts SELECT value FROM STRING_SPLIT(@cron, ',');
+
+ DECLARE @writablecron varchar(255) = @cron
+ DECLARE @part varchar(255) 
+ DECLARE @pos int
+
+ WHILE CHARINDEX(',', @writablecron) > 0
+ BEGIN
+
+  SELECT @pos = CHARINDEX(',', @writablecron)
+  SELECT @part = SUBSTRING(@writablecron, 1, @pos - 1)
+  
+  INSERT INTO @parts 
+  SELECT @part
+
+  SELECT @writablecron = SUBSTRING(@writablecron, @pos+1, LEN(@writablecron)-@pos)
+
+ END
+ INSERT INTO @parts 
+ SELECT @writablecron
+
 
  --Return a distinct list of numbers that match the aggregated cron segment
  INSERT INTO @result(numbers) 
@@ -483,7 +506,7 @@ BEGIN
 
 	--Generate all time values, by combining all hours and all minutes
 	INSERT INTO @ttimes(value)
-	SELECT t = TIMEFROMPARTS( h.value, m.value, 0, 0, 0)
+	SELECT t = RIGHT('0' + CAST(h.value as varchar(2)), 2) + ':' + RIGHT('0' + CAST(m.value as varchar(2)), 2) + ':00'
 	FROM @tHours h CROSS JOIN @tMinutes m
 
 	;WITH allScheduledTimes AS --Generate datetime values for all dates and times
@@ -621,7 +644,7 @@ BEGIN
 
 	--Generate all time values, by combining all hours and all minutes
 	INSERT INTO @ttimes(value)
-	SELECT t = TIMEFROMPARTS( h.value, m.value, 0, 0, 0)
+	SELECT t = RIGHT('0' + CAST(h.value as varchar(2)), 2) + ':' + RIGHT('0' + CAST(m.value as varchar(2)), 2) + ':00'
 	FROM @tHours h CROSS JOIN @tMinutes m
 
 	;WITH allScheduledTimes AS --Generate datetime values for all dates and times
