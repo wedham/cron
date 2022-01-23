@@ -111,6 +111,7 @@ GO
 Date		Name				Description
 ----------	-------------		-----------------------------------------------
 2022-01-10	Mikael Wedham		+Created v1
+2022-01-23	Mikael Wedham		+Edited for 2008+ compatibility
 *******************************************************************************/
 CREATE OR ALTER FUNCTION [cron].[internal_ParseRangeExpression]
 (@cron varchar(255)) 
@@ -167,6 +168,7 @@ GO
 Date		Name				Description
 ----------	-------------		-----------------------------------------------
 2022-01-10	Mikael Wedham		+Created v1
+2022-01-23	Mikael Wedham		+Edited for 2008+ compatibility
 *******************************************************************************/
 CREATE OR ALTER FUNCTION [cron].[internal_ParseEveryNExpression]
 (@cron varchar(255)) 
@@ -301,6 +303,7 @@ GO
 Date		Name				Description
 ----------	-------------		-----------------------------------------------
 2022-01-10	Mikael Wedham		+Created v1
+2022-01-23	Mikael Wedham		+Edited for 2008+ compatibility
 *******************************************************************************/
 CREATE OR ALTER FUNCTION [cron].[internal_ParseField]
 (@cron varchar(255), @min int, @max int) 
@@ -411,8 +414,9 @@ GO
 
 Date		Name				Description
 ----------	-------------		-----------------------------------------------
-2022-01-10	Mikael Wedham		+Created v1
-2022-01-11  Mikael Wedham       Changed return type to table for consistency when querying
+2022-01-10      Mikael Wedham           +Created v1
+2022-01-11      Mikael Wedham           Changed return type to table for consistency when querying
+2022-01-23	Mikael Wedham		+Edited for 2008+ compatibility
 *******************************************************************************/
 CREATE OR ALTER FUNCTION [cron].[GetPreviousSchedule]
 (@cron varchar(255)) 
@@ -549,6 +553,7 @@ GO
 Date		Name				Description
 ----------	-------------		-----------------------------------------------
 2022-01-04	Mikael Wedham		+Created v1
+2022-01-23	Mikael Wedham		+Edited for 2008+ compatibility
 *******************************************************************************/
 CREATE OR ALTER FUNCTION [cron].[GetNextSchedule]
 (@cron varchar(255), @MaxScheduleCount int) 
