@@ -691,7 +691,7 @@ Date		Name				Description
 ----------	-------------		-----------------------------------------------
 2022-05-04	Mikael Wedham		+Created v1
 *******************************************************************************/
-ALTER   FUNCTION [cron].[GetNextScheduleAfter]
+CREATE OR ALTER   FUNCTION [cron].[GetNextScheduleAfter]
 (@cron varchar(255), @PreviousStartDate datetime = NULL) 
 RETURNS @result TABLE (scheduledtime datetime)
 AS
