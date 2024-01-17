@@ -1,12 +1,14 @@
 # cron
 ## A T-SQL library for using and parsing CRON scheduling strings
 
-This library consists of a T-SQL Scalar User Defined Functions 
+This library consists of three T-SQL User Defined Functions 
 
 Also in the library is an additional coulple of UDFs for internal use. And two helper tables to increase performance of the parsing.
 
 It is written for the basic cron syntax with 5 fields. 
-- [cron].[GetNext]
+- [cron].[GetNextSchedule]
+- [cron].[GetNextScheduleAfter]
+- [cron].[GetPreviousSchedule]
 
 The library is licensed under the [MIT License](LICENSE) 
 
@@ -42,8 +44,7 @@ https://crontab.guru/crontab.5.html
 This site is also where you find example cron expressions to try out yourself.
 
 ---
-#### Example usage is available in the header of the UDF:
+#### Partial example usage is available in the header of the UDFs:
 
-`SELECT [cron].[GetNext]('* * * * *', NULL)`  
 
  

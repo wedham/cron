@@ -1,76 +1,414 @@
---Copyright (c) 2022 Mikael Wedham 
+USE [CRONTESTDATABASE]
+GO
+SET NOCOUNT ON 
+GO
 
---Permission is hereby granted, free of charge, to any person obtaining a copy
---of this software and associated documentation files (the "Software"), to deal
---in the Software without restriction, including without limitation the rights
---to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
---copies of the Software, and to permit persons to whom the Software is
---furnished to do so, subject to the following conditions:
---
---The above copyright notice and this permission notice shall be included in all
---copies or substantial portions of the Software.
---
---THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
---IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
---FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
---AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
---LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
---OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
---SOFTWARE.
+/****** Section:  Schemas ******/
+
+/****** Object:  Schema [internal] ******/
+IF (NOT EXISTS (SELECT * FROM sys.schemas WHERE name = 'internal')) 
+BEGIN
+    EXEC ('CREATE SCHEMA [internal] AUTHORIZATION [dbo]')
+END
+GO
+
+/****** Object:  Schema [cron] ******/
+IF (NOT EXISTS (SELECT * FROM sys.schemas WHERE name = 'cron')) 
+BEGIN
+    EXEC ('CREATE SCHEMA [cron] AUTHORIZATION [dbo]')
+END
+GO
+
+/****** Section:  Schemas ******/
+
+--==================================================================================================================
+--==================================================================================================================
+--==================================================================================================================
+
+/****** Section:  Prerequisites ******/
+
+/****** Object:  Table-Value Function  [internal].[TableMetadataChecker] ******/
+IF OBJECT_ID(N'[internal].[TableMetadataChecker]', N'IF') IS NULL
+BEGIN
+	EXEC ('CREATE FUNCTION [internal].[TableMetadataChecker] () RETURNS TABLE AS RETURN SELECT x = NULL')
+END
+GO
+
+/*******************************************************************************
+--Copyright (c) 2024 Mikael Wedham (MIT License)
+   -----------------------------------------
+   [internal].[TableMetadataChecker]
+   -----------------------------------------
+   Calculates a checksum of the definition of a table.
+   The checksum column is returned as a varbinary(32)
+
+Date		Name				Description
+----------	-------------		-----------------------------------------------
+2024-01-15	Mikael Wedham		+Created v1
+*******************************************************************************/
+ALTER FUNCTION [internal].[TableMetadataChecker]
+(@schemaname nvarchar(128), @tablename nvarchar(128), @tabledefinitionhash varbinary(32))
+RETURNS TABLE
+AS
+RETURN
+WITH ListOfTableMetadata AS
+    (
+        SELECT [schemaname] = @schemaname
+		     , [tablename] = @tablename
+             , [fullname] = CONCAT('[', schemainfo.[name], '].[', tableinfo.[name], ']')
+             , [columndata] = CAST((SELECT columnname = columninfo.[name]
+										 , columninfo.[system_type_id]
+										 , columninfo.[max_length]
+										 , columninfo.[precision]
+										 , columninfo.[scale]
+										 , columninfo.[is_nullable]
+										 , collation_name = ISNULL(columninfo.[collation_name],N'')
+									FROM sys.columns columninfo 
+									WHERE columninfo.[object_id] = tableinfo.[object_id]
+									ORDER BY columnname
+									FOR XML AUTO, ROOT(N'columns')) AS XML
+								   )
+			, [TableExists] = 1
+		FROM sys.objects tableinfo 
+        INNER JOIN sys.schemas schemainfo 
+            ON tableinfo.[schema_id] = schemainfo.[schema_id]
+        WHERE tableinfo.[type] = 'U' 
+		  AND schemainfo.[name] = @schemaname
+		  AND tableinfo.[name] = @tablename
+		UNION ALL
+        SELECT [schemaname] = @schemaname
+		     , [tablename] = @tablename
+			 , [fullname] = CAST(NULL as nvarchar(256))
+			 , [columndata] = CAST(NULL as XML)
+			 , [TableExists] = 0
+    ), CurrentTableDefinition AS
+	(
+		SELECT TOP(1) [SchemaName] = [schemaname]
+			 , [TableName] = [tablename]
+			 , [FullName] = [fullname]
+			 , [TableDefinitionHash] = CAST(CASE WHEN [TableExists] = 0 THEN NULL ELSE HASHBYTES('SHA2_256', (SELECT fullname, columndata FROM (VALUES(NULL))keydata(x) FOR JSON AUTO)) END AS varbinary(32))
+			 , [TableExists]  = CAST([TableExists] AS int)
+		FROM ListOfTableMetadata
+		ORDER BY [TableExists] DESC
+	)
+		SELECT [SchemaName] = [SchemaName]
+			 , [TableName] = [TableName]
+			 , [FullName] = [FullName]
+			 , [TableDefinitionHash] = [TableDefinitionHash]
+			 , [TableExists] 
+			 , [TableHasChanged] = CAST(CASE WHEN ISNULL(@tabledefinitionhash, 0x00) = [TableDefinitionHash] OR [TableExists] = 0 THEN 0 ELSE 1 END AS int)
+		FROM CurrentTableDefinition
 
 
-IF NOT EXISTS ( SELECT * FROM sys.schemas WHERE name = N'cron' )
- EXEC('CREATE SCHEMA [cron] AUTHORIZATION [dbo]');
+GO
+
+
+/****** FUNCTION USAGE Example ******/
+
+--DECLARE @SchemaName nvarchar(128) = N'internal'
+--DECLARE @TableName nvarchar(128) = N'TableDefinitions'
+--DECLARE @TableDefinitionHash varbinary(32) = 0xE38BB1615C5C08C0D8F8A584050077FE43B0A5932FE24262F7C8CAEEA514D064
+
+--DECLARE @TableExists int
+--DECLARE @TableHasChanged int
+--SELECT @TableExists = [TableExists]
+--     , @TableHasChanged = [TableHasChanged]
+--FROM [internal].[TableMetadataChecker](@SchemaName, @TableName, @TableDefinitionHash)
+
+--IF @TableExists = 1 AND @TableHasChanged = 1
+--BEGIN
+--	RAISERROR(N'sp_rename of original table', 10, 1) WITH NOWAIT
+
+--	DECLARE @NewName nvarchar(128)
+--	SELECT @NewName = @TableName + N'_'
+--	       + REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(100), GETDATE(), 126), N'-', N''), N':', N''), N'.', N'')
+--	ALTER TABLE [internal].[TableDefinitions] DROP CONSTRAINT [PK_internal_TableDefinitions]
+--	EXECUTE sp_rename N'[internal].[TableDefinitions]', @NewName, 'OBJECT' 
+
+--	SET @TableExists = 0
+--END
+
+--IF @TableExists = 0
+--BEGIN
+--	RAISERROR(N'Creating [internal].[TableDefinitions]', 10, 1) WITH NOWAIT
+--	CREATE TABLE [internal].[TableDefinitions](
+--		[SchemaName] [nvarchar](128) NOT NULL,
+--		[TableName] [nvarchar](128) NOT NULL,
+--		[ObjectDefinitionHash] varbinary(64) NOT NULL,
+--	 CONSTRAINT [PK_internal_TableDefinitions] PRIMARY KEY CLUSTERED 
+--		(
+--			[SchemaName] ASC,
+--			[TableName] ASC
+--		) ON [PRIMARY]
+--	) ON [PRIMARY]
+--END
+--GO
+
+/****** Section:  Prerequisites ******/
+
+--==================================================================================================================
+--==================================================================================================================
+--==================================================================================================================
+
+
+/****** Section:  Tables ******/
+
+/****** Object:  Table [cron].[Numbers] ******/
+DECLARE @SchemaName nvarchar(128) = N'cron'
+DECLARE @TableName nvarchar(128) = N'Numbers'
+DECLARE @TableDefinitionHash varbinary(32) = 0x3593C0AD8F379BC0767E7D2EF39B18A8800ABD510BBFA05FB99FCB5730B1C3EB
+
+DECLARE @TableExists int
+DECLARE @TableHasChanged int
+SELECT @TableExists = [TableExists]
+     , @TableHasChanged = [TableHasChanged]
+FROM [internal].[TableMetadataChecker](@SchemaName, @TableName, @TableDefinitionHash)
+
+IF @TableExists = 1 AND @TableHasChanged = 1
+BEGIN
+	RAISERROR(N'DROPPING original table', 10, 1) WITH NOWAIT
+	DROP TABLE [cron].[Numbers] 
+	SET @TableExists = 0
+END
+
+IF @TableExists = 0
+BEGIN
+	RAISERROR(N'Creating [cron].[Numbers]', 10, 1) WITH NOWAIT
+	CREATE TABLE [cron].[Numbers](
+		[number] [int] NOT NULL,
+	 CONSTRAINT [PK_cron_numbers] PRIMARY KEY CLUSTERED 
+		(
+			[number] ASC
+		) ON [PRIMARY]
+	) ON [PRIMARY]
+END
+GO
+
+
+--/****** Object:  Table [cron].[Dates] ******/
+DECLARE @SchemaName nvarchar(128) = N'cron'
+DECLARE @TableName nvarchar(128) = N'Dates'
+DECLARE @TableDefinitionHash varbinary(32) = 0xDE222BAA5A078374A4523E9B0FAB140A5AB41B0C5F0DFC8A3E6D50C59520B276
+
+DECLARE @TableExists int
+DECLARE @TableHasChanged int
+SELECT @TableExists = [TableExists]
+     , @TableHasChanged = [TableHasChanged]
+FROM [internal].[TableMetadataChecker](@SchemaName, @TableName, @TableDefinitionHash)
+
+IF @TableExists = 1 AND @TableHasChanged = 1
+BEGIN
+	RAISERROR(N'DROPPING original table', 10, 1) WITH NOWAIT
+	DROP TABLE [cron].[Dates] 
+	SET @TableExists = 0
+END
+
+IF @TableExists = 0
+BEGIN
+	RAISERROR(N'Creating [cron].[Dates]', 10, 1) WITH NOWAIT
+	CREATE TABLE [cron].[Dates](
+		[datevalue] [date] NOT NULL,
+		[yearvalue] [int] NOT NULL,
+		[monthvalue] [int] NOT NULL,
+		[dayvalue] [int] NOT NULL,
+		[weekdayvalue] [int] NOT NULL,
+	 CONSTRAINT [PK_cron_Dates] PRIMARY KEY CLUSTERED 
+		(
+			[datevalue] ASC
+		) ON [PRIMARY]
+	) ON [PRIMARY]
+END
+GO
+
+/****** Section:  Tables ******/
+
+--==================================================================================================================
+--==================================================================================================================
+--==================================================================================================================
+
+/****** Section:  Stored Procedures ******/
+
+/****** Object:  StoredProcedure [cron].[FillNumbers] ******/
+IF OBJECT_ID(N'cron.FillNumbers', N'P') IS NULL
+BEGIN
+	EXEC ('CREATE PROCEDURE [cron].[FillNumbers] AS SELECT NULL')
+END
+GO
+
+/*******************************************************************************
+--Copyright (c) 2024 Mikael Wedham (MIT License)
+   -----------------------------------------
+   [cron].[FillNumbers]
+   -----------------------------------------
+   Fills the Numbers-table with many numbers (default 10000)
+
+Date		Name				Description
+----------	-------------		-----------------------------------------------
+2024-01-16	Mikael Wedham		+Created v1
+*******************************************************************************/
+ALTER PROCEDURE [cron].[FillNumbers]
+(@NumberCount int = 10000)
+AS
+BEGIN
+--Create a sequence of numbers between zero and @numbercount
+;WITH num AS
+		(
+		 SELECT number = 0 
+		   UNION ALL 
+		 SELECT number = number + 1 
+		 FROM num 
+		 WHERE number < @NumberCount
+		 )
+
+	--Merge the number sequence, adding missing numbers to the table
+	MERGE [cron].[Numbers] n USING num src
+		ON n.number = src.number
+	WHEN NOT MATCHED THEN
+		INSERT ([number])
+		VALUES (src.number)
+	OPTION (maxrecursion 0);
+END
+GO
+
+/****** Object:  StoredProcedure [cron].[FillDates] ******/
+IF OBJECT_ID(N'cron.FillDates', N'P') IS NULL
+BEGIN
+	EXEC ('CREATE PROCEDURE [cron].[FillDates] AS SELECT NULL')
+END
+GO
+
+/*******************************************************************************
+--Copyright (c) 2024 Mikael Wedham (MIT License)
+   -----------------------------------------
+   [cron].[FillDates]
+   -----------------------------------------
+   Fills the Dates-table with dates, to be used for schedule calculations
+
+   Parameters:
+    @FutureNumberOfDates = This is how far in the future dates should be added
+	@PreviousNumberOfDates = This value represents the number of past dates to be inserted 
+
+Date		Name				Description
+----------	-------------		-----------------------------------------------
+2024-01-16	Mikael Wedham		+Created v1
+*******************************************************************************/
+ALTER PROCEDURE [cron].[FillDates]
+(
+  @FutureNumberOfDates int = 10000 --Number of days
+, @PreviousNumberOfDates int = -366
+)
+AS
+BEGIN
+		--Get a value in order to work with all DATEFIRST settings
+		DECLARE @deltaday int
+		SELECT @deltaday = @@DATEFIRST - 1
+
+	--Create a sequence of numbers between @PreviousNumberOfDates and @FutureNumberOfDates
+	;WITH datenum AS --Get a number list for the estimated number of days
+		(SELECT number = @PreviousNumberOfDates 
+		   UNION ALL 
+		 SELECT number = number + 1 
+		 FROM datenum 
+		 WHERE number < @FutureNumberOfDates)
+	,datesequence AS --Create the date list, with the last run date as the base.
+		(SELECT number
+			  , dt = CAST(DATEADD(DAY, number, SYSUTCDATETIME()) AS date)
+		 FROM datenum )
+	, datelist AS
+	(SELECT dt
+	       ,y = YEAR(dt)
+	       ,m = MONTH(dt)
+           ,d = DAY(dt)
+		   ,dw = (DATEPART(WEEKDAY, dt) + @deltaday) % 7		--Modulo accounts for overflowing daynumbers if DATEFIRST > 1
+	FROM datesequence)
+
+	MERGE [cron].[Dates] d USING datelist src
+	ON d.[datevalue] = src.dt
+	WHEN NOT MATCHED THEN
+		INSERT ([datevalue],[yearvalue],[monthvalue],[dayvalue],[weekdayvalue])
+		VALUES (src.dt, src.y, src.m, src.d, src.dw)
+	WHEN MATCHED AND d.[weekdayvalue] != src.dw THEN
+		UPDATE SET [weekdayvalue] = src.dw
+	OPTION (maxrecursion 0);
+
+END
+GO
+
+/****** Section:  Stored Procedures ******/
+
+--==================================================================================================================
+--==================================================================================================================
+--==================================================================================================================
+
+/****** Section:  User Defined Functions ******/
+
+/****** Object:  UserDefinedFunction [cron].[NormalizeExpression] ******/
+IF OBJECT_ID(N'[cron].[NormalizeExpression]', N'FN') IS NULL
+BEGIN
+	EXEC ('CREATE FUNCTION [cron].[NormalizeExpression] () RETURNS varchar(255) AS BEGIN RETURN NULL END')
+END
 GO
 
 /*******************************************************************************
 --Copyright (c) 2022 Mikael Wedham (MIT License)
    -----------------------------------------
-   [cron].[internal_GetNumbers]
+   [cron].[NormalizeExpression]
    -----------------------------------------
-   Base functionality of the interval parser
-   Returns a list of numbers between the parameters Min and Max. 
-   EveryN parameter selects Every N rows only.
-
-   USAGE:
-   --Get every number between 1 and 5
-   SELECT * FROM [cron].[internal_GetNumbers](1, 5, 1)
-   --Get every third number between 1 and 24
-   SELECT * FROM [cron].[internal_GetNumbers](0, 23, 3)
-   --Get every 10th number between 3 and 35
-   SELECT * FROM [cron].[internal_GetNumbers](3, 35, 10)
+   Returns a cron expression without repeating spaces
+   , where the month/day texts are replaced by numbers.
 
 Date		Name				Description
 ----------	-------------		-----------------------------------------------
 2022-01-10	Mikael Wedham		+Created v1
 *******************************************************************************/
-CREATE OR ALTER FUNCTION [cron].[internal_GetNumbers]
-(@Min int, @Max int, @EveryN int) 
-RETURNS @result TABLE (number int)
+ALTER FUNCTION [cron].[NormalizeExpression]
+(@cron varchar(255))
+RETURNS varchar(255)
 AS
-BEGIN
-	--Assume NULL means every value
-    SET @EveryN = ISNULL(@EveryN, 1)
-	--Ranges must be entered left-to-right
-    IF @Max >= @Min
+BEGIN 
+	DECLARE @cronexpression varchar(255)
+	SET @cronexpression = @cron
+
+	--Remove repeating whitespaces
+	WHILE CHARINDEX('  ',@cronexpression) > 0
 	BEGIN
-	     --Recursive CTE with counter column for use with EveryN functionality
-  		WITH Starter(mv, ctr) AS (
-			SELECT @Min, 0 --Root value
-			UNION ALL
-			SELECT mv + 1, ctr + 1 --Increment values
-			FROM Starter --Recursive connection
-			WHERE mv + 1 <= @Max --End value
-		)
-		INSERT @result (number) --Prepare results table
-		SELECT mv 
-		FROM Starter
-		WHERE ctr % @EveryN = 0; --Modulo calculation on selector returns only the values wanted
+		SET @cronexpression = REPLACE(@cronexpression, '  ',' ')
 	END
-  RETURN
+
+	--Replace Month texts with numeric values
+	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'JAN', '1')
+	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'FEB', '2')
+	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'MAR', '3')
+	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'APR', '4')
+	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'MAY', '5')
+	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'JUN', '6')
+	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'JUL', '7')
+	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'AUG', '8')
+	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'SEP', '9')
+	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'OCT', '10')
+	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'NOV', '11')
+	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'DEC', '12')
+
+	--Replace day texts with numeric values
+	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'SUN', '0')
+	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'MON', '1')
+	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'TUE', '2')
+	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'WED', '3')
+	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'THU', '4')
+	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'FRI', '5')
+	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'SAT', '6')
+
+	RETURN @cronexpression
 END
 GO
 
+
+/****** Object:  UserDefinedFunction [cron].[internal_ParseRangeExpression] ******/
+IF OBJECT_ID(N'[cron].[internal_ParseRangeExpression]', N'TF') IS NULL
+BEGIN
+	EXEC ('CREATE FUNCTION [cron].[internal_ParseRangeExpression] () RETURNS @result TABLE (x int) AS BEGIN RETURN END')
+END
+GO
 
 /*******************************************************************************
 --Copyright (c) 2022 Mikael Wedham (MIT License)
@@ -111,9 +449,8 @@ GO
 Date		Name				Description
 ----------	-------------		-----------------------------------------------
 2022-01-10	Mikael Wedham		+Created v1
-2022-01-23	Mikael Wedham		+Edited for 2008+ compatibility
 *******************************************************************************/
-CREATE OR ALTER FUNCTION [cron].[internal_ParseRangeExpression]
+ALTER FUNCTION [cron].[internal_ParseRangeExpression]
 (@cron varchar(255)) 
 RETURNS @result TABLE (fromnumber int, tonumber int)
 AS
@@ -122,13 +459,11 @@ BEGIN
 	DECLARE @to int 
 
 	DECLARE @splitter int
-	DECLARE @splitter2 int
 	--Find the position of the '-' separator
 	SELECT @splitter = CHARINDEX('-', @cron)
-	SELECT @splitter2 = CHARINDEX('-', @cron, @splitter + 1)
 
 	--If separator is duplicated or missing, this is not a correct cron part : exit.
-	IF (@splitter = 0) OR (@splitter2 > 0)
+	IF ( SELECT COUNT(*) FROM STRING_SPLIT(@cron, '-')) <> 2 OR (@splitter = 0)
 	BEGIN
 	   RETURN
 	END
@@ -146,6 +481,15 @@ BEGIN
 	INSERT INTO @result(fromnumber, tonumber) SELECT @from, @to 
 
 	RETURN
+END
+GO
+
+
+
+/****** Object:  UserDefinedFunction [cron].[internal_ParseEveryNExpression] ******/
+IF OBJECT_ID(N'[cron].[internal_ParseEveryNExpression]', N'TF') IS NULL
+BEGIN
+	EXEC ('CREATE FUNCTION [cron].[internal_ParseEveryNExpression] () RETURNS @result TABLE (x int) AS BEGIN RETURN END')
 END
 GO
 
@@ -168,9 +512,8 @@ GO
 Date		Name				Description
 ----------	-------------		-----------------------------------------------
 2022-01-10	Mikael Wedham		+Created v1
-2022-01-23	Mikael Wedham		+Edited for 2008+ compatibility
 *******************************************************************************/
-CREATE OR ALTER FUNCTION [cron].[internal_ParseEveryNExpression]
+ALTER FUNCTION [cron].[internal_ParseEveryNExpression]
 (@cron varchar(255)) 
 RETURNS @result TABLE (cron varchar(255), everyn int)
 AS
@@ -179,13 +522,11 @@ BEGIN
 	DECLARE @modulo int
 
 	DECLARE @splitter int
-	DECLARE @splitter2 int
 	--Find the position of the '/' separator
 	SELECT @splitter = CHARINDEX('/', @cron)
-	SELECT @splitter2 = CHARINDEX('/', @cron, @splitter + 1)
 
 	--If separator is duplicated or missing, this is not a correct cron part : exit.
-	IF (@splitter = 0) OR (@splitter2 > 0)
+	IF ( SELECT COUNT(*) FROM STRING_SPLIT(@cron, '/')) <> 2 OR (@splitter = 0)
 	BEGIN
 	   RETURN
 	END
@@ -203,6 +544,14 @@ END
 GO
 
 
+
+
+/****** Object:  UserDefinedFunction [cron].[internal_ParseFieldPart] ******/
+IF OBJECT_ID(N'[cron].[internal_ParseFieldPart]', N'TF') IS NULL
+BEGIN
+	EXEC ('CREATE FUNCTION [cron].[internal_ParseFieldPart] () RETURNS @result TABLE (x int) AS BEGIN RETURN END')
+END
+GO
 
 /*******************************************************************************
 --Copyright (c) 2022 Mikael Wedham (MIT License)
@@ -225,8 +574,9 @@ GO
 Date		Name				Description
 ----------	-------------		-----------------------------------------------
 2022-01-10	Mikael Wedham		+Created v1
+2023-11-27	Mikael Wedham		+Refactored to use internal Numbers table
 *******************************************************************************/
-CREATE OR ALTER FUNCTION [cron].[internal_ParseFieldPart]
+ALTER FUNCTION [cron].[internal_ParseFieldPart]
 (@cron varchar(255), @min int, @max int) 
 RETURNS @result TABLE (number int)
 AS
@@ -270,8 +620,10 @@ BEGIN
 
  --Prepare the results based on the full parsing of the cron expression
  INSERT INTO @result(number) 
- SELECT number 
- FROM [cron].[internal_GetNumbers](@start, @stop, @EveryN)
+ 	SELECT n.[number]
+	FROM [cron].[Numbers] n
+	WHERE n.[number] BETWEEN @start AND @stop
+	  AND (n.[number] % ISNULL(@EveryN, 1) = 0 OR ISNULL(@EveryN, 1) = 1)
  
  RETURN
 END
@@ -280,6 +632,12 @@ GO
 
 
 
+/****** Object:  UserDefinedFunction [cron].[internal_ParseField] ******/
+IF OBJECT_ID(N'[cron].[internal_ParseField]', N'IF') IS NULL
+BEGIN
+	EXEC ('CREATE FUNCTION [cron].[internal_ParseField] () RETURNS TABLE AS RETURN SELECT x = NULL')
+END
+GO
 
 /*******************************************************************************
 --Copyright (c) 2022 Mikael Wedham (MIT License)
@@ -303,405 +661,73 @@ GO
 Date		Name				Description
 ----------	-------------		-----------------------------------------------
 2022-01-10	Mikael Wedham		+Created v1
-2022-01-23	Mikael Wedham		+Edited for 2008+ compatibility
+2023-11-27	Mikael Wedham		+Rewrite as Inline TVF
 *******************************************************************************/
-CREATE OR ALTER FUNCTION [cron].[internal_ParseField]
+ALTER FUNCTION [cron].[internal_ParseField]
 (@cron varchar(255), @min int, @max int) 
-RETURNS @result TABLE (numbers int)
+RETURNS TABLE 
 AS
-BEGIN
- --Unsorted list of parts in one segment
- DECLARE @parts TABLE (segment varchar(255))
-
- DECLARE @writablecron varchar(255) = @cron
- DECLARE @part varchar(255) 
- DECLARE @pos int
-
- WHILE CHARINDEX(',', @writablecron) > 0
- BEGIN
-
-  SELECT @pos = CHARINDEX(',', @writablecron)
-  SELECT @part = SUBSTRING(@writablecron, 1, @pos - 1)
-  
-  INSERT INTO @parts 
-  SELECT @part
-
-  SELECT @writablecron = SUBSTRING(@writablecron, @pos+1, LEN(@writablecron)-@pos)
-
- END
- INSERT INTO @parts 
- SELECT @writablecron
-
-
+RETURN
+(
  --Return a distinct list of numbers that match the aggregated cron segment
- INSERT INTO @result(numbers) 
  SELECT DISTINCT s.number  
- FROM @parts p CROSS APPLY [cron].[internal_ParseFieldPart](p.segment, @min, @max) s
- 
- RETURN
-END
+ FROM STRING_SPLIT(@cron, ',') p CROSS APPLY [cron].[internal_ParseFieldPart](p.value, @min, @max) s
+)
+
 GO
 
 
-/*******************************************************************************
---Copyright (c) 2022 Mikael Wedham (MIT License)
-   -----------------------------------------
-   [cron].[NormalizeExpression]
-   -----------------------------------------
-   Returns a cron expression without repeating spaces
-   , where the month/day texts are replaced by numbers.
 
-Date		Name				Description
-----------	-------------		-----------------------------------------------
-2022-01-10	Mikael Wedham		+Created v1
-*******************************************************************************/
-CREATE OR ALTER FUNCTION [cron].[NormalizeExpression]
-(@cron varchar(255))
-RETURNS varchar(255)
-AS
-BEGIN 
-	DECLARE @cronexpression varchar(255)
-	SET @cronexpression = @cron
-
-	--Remove repeating whitespaces
-	WHILE CHARINDEX('  ',@cronexpression) > 0
-	BEGIN
-		SET @cronexpression = REPLACE(@cronexpression, '  ',' ')
-	END
-
-	--Replace Month texts with numeric values
-	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'JAN', '1')
-	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'FEB', '2')
-	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'MAR', '3')
-	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'APR', '4')
-	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'MAY', '5')
-	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'JUN', '6')
-	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'JUL', '7')
-	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'AUG', '8')
-	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'SEP', '9')
-	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'OCT', '10')
-	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'NOV', '11')
-	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'DEC', '12')
-
-	--Replace day texts with numeric values
-	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'SUN', '0')
-	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'MON', '1')
-	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'TUE', '2')
-	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'WED', '3')
-	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'THU', '4')
-	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'FRI', '5')
-	SET @cronexpression = REPLACE(UPPER(@cronexpression), 'SAT', '6')
-
-	RETURN @cronexpression
-END
-GO
-
-/*******************************************************************************
---Copyright (c) 2022 Mikael Wedham (MIT License)
-   -----------------------------------------
-   [cron].[GetPreviousSchedule]
-   -----------------------------------------
-   Gets the next run date and time for this cron expression.
-   If this functions result is larger than the value of the last run time
-   , that means the schedule is overdue and sould be run immediately.
-
-   USAGE:
-   SELECT * FROM [cron].[GetPreviousSchedule]('* * * * *')                  --Each minute
-   SELECT * FROM [cron].[GetPreviousSchedule]('59 23 31 12 5')              --One minute  before the end of year if the last day of the year is Friday
-   SELECT * FROM [cron].[GetPreviousSchedule]('45 17 7 6 * ')               --Every  year, on June 7th at 17:45 
-   SELECT * FROM [cron].[GetPreviousSchedule]('* / 15 * / 6 1,15,31 * 1-5')  --At 00:00, 00:15, 00:30, 00:45, 06:00, 06:15, 06:30, 06:45, 12:00, 12:15, 12:30, 12:45, 18:00, 18:15, 18:30, 18:45, on 1st, 15th or  31st of each  month, but not on weekends
-   SELECT * FROM [cron].[GetPreviousSchedule]('0 12 * * 1-5')               --At midday on weekdays
-
-Date		Name				Description
-----------	-------------		-----------------------------------------------
-2022-01-10      Mikael Wedham           +Created v1
-2022-01-11      Mikael Wedham           Changed return type to table for consistency when querying
-2022-01-23	    Mikael Wedham		    +Edited for 2008+ compatibility
-*******************************************************************************/
-CREATE OR ALTER FUNCTION [cron].[GetPreviousSchedule]
-(@cron varchar(255)) 
-RETURNS @result TABLE (scheduledtime datetime)
-AS
+/****** Object:  UserDefinedFunction [cron].[GetNext]    Script Date: 2023-11-28 11:21:27 ******/
+IF OBJECT_ID(N'[cron].[GetNext]', N'FN') IS NULL
 BEGIN
-	--Create writable cron
-	DECLARE @cronexpression varchar(255)
-	SET @cronexpression = [cron].[NormalizeExpression](@cron)
-
-	DECLARE @minute varchar(255)
-	DECLARE @minutepos int
-	DECLARE @hour varchar(255)
-	DECLARE @hourpos int
-	DECLARE @dayofmonth varchar(255)
-	DECLARE @dayofmonthpos int
-	DECLARE @month varchar(255)
-	DECLARE @monthpos int
-	DECLARE @dayofweek varchar(255)
-
-	--Get positions of all parts 
-	SELECT @minutepos = CHARINDEX(' ', @cronexpression, 1) - 1
-	SELECT @hourpos = CHARINDEX(' ', @cronexpression, @minutepos+2) - 1
-	SELECT @dayofmonthpos = CHARINDEX(' ', @cronexpression, @hourpos+2) - 1
-	SELECT @monthpos = CHARINDEX(' ', @cronexpression, @dayofmonthpos+2) - 1
-
-	--Extract the different parts of the cron expression
-	SELECT @minute = SUBSTRING(@cronexpression, 1, @minutepos) 
-	, @hour = SUBSTRING(@cronexpression, @minutepos + 2, @hourpos-@minutepos) 
-	, @dayofmonth = SUBSTRING(@cronexpression,@hourpos + 2 , @dayofmonthpos-@hourpos) 
-	, @month = SUBSTRING(@cronexpression, @dayofmonthpos + 2, @monthpos-@dayofmonthpos) 
-	, @dayofweek = SUBSTRING(@cronexpression,@monthpos + 2, LEN(@cronexpression)-@monthpos+1) 
-
-		--Get a list of all minutes in the expression
-		DECLARE @tMinutes TABLE (value int)
-		INSERT @tMinutes (value) SELECT numbers FROM [cron].[internal_ParseField](@minute, 0, 59);
-
-		--Get a list of all hours in the expression
-		DECLARE @tHours TABLE (value int)
-		INSERT @tHours (value) SELECT numbers FROM [cron].[internal_ParseField](@hour, 0, 23);
-
-		--Get a list of all days of the month in the expression
-		DECLARE @tDays TABLE (value int)
-		INSERT @tDays (value) SELECT numbers FROM [cron].[internal_ParseField](@dayofmonth, 1, 31);
-
-		--Get a list of all months in the expression
-		DECLARE @tMonths TABLE (value int)
-		INSERT @tMonths (value) SELECT numbers FROM [cron].[internal_ParseField](@month, 1, 12);
-
-		--Get a list of all allowed days of the week in the expression
-		DECLARE @tWeekdays TABLE (value int)
-		INSERT @tWeekdays (value) SELECT numbers FROM [cron].[internal_ParseField](@dayofweek, 0, 7);
-
-		--Get a value in order to work with all DATEFIRST settings
-		DECLARE @deltaday int
-		SELECT @deltaday = @@DATEFIRST - 1
-
-	--Do not calculate more days than needed (rough estimate)
-	DECLARE @days int = 7
-	
-    --Contains all dates that should have at least one scheduled time
-	DECLARE @tdates TABLE (value date)
-	
-	WHILE (SELECT COUNT(*) FROM @tdates) < 1 OR @days > 2500000
-	BEGIN
-		;WITH datenum AS --Get a number list for the estimated number of days
-			(SELECT number = 1 
-			   UNION ALL 
-			 SELECT number = number - 1 
-			 FROM datenum 
-			 WHERE number > -@days)
-		,datesequence AS --Create the date list, with the last run date as the base.
-			(SELECT number
-				  , dt = DATEADD(DAY, number, GETDATE())
-			 FROM datenum )
-
-		--Get all the dates from the date list that match the date filter
-		--Modulo accounts for overflowing daynumbers if DATEFIRST > 1
-		INSERT INTO @tdates(value)
-		SELECT dates.dt 
-		FROM datesequence dates INNER JOIN @tMonths m ON m.value = DATEPART(MONTH, dates.dt) --Only get dates for the selected months
-			INNER JOIN @tDays d ON d.value = DATEPART(DAY, dates.dt) --Only get dates for the selected day of month
-			INNER JOIN @tWeekdays w ON w.value = (DATEPART(WEEKDAY, dates.dt) + @deltaday) % 7 --Only get dates for the selected day of week. 
-		option (maxrecursion 0)
-
-		SET @days = @days * 2
-    END
-
-	--Contains all scheduled times
-	DECLARE @ttimes TABLE (value time(0))
-
-	--Generate all time values, by combining all hours and all minutes
-	INSERT INTO @ttimes(value)
-	SELECT t = RIGHT('0' + CAST(h.value as varchar(2)), 2) + ':' + RIGHT('0' + CAST(m.value as varchar(2)), 2) + ':00'
-	FROM @tHours h CROSS JOIN @tMinutes m
-
-	;WITH allScheduledTimes AS --Generate datetime values for all dates and times
-	  ( SELECT schedule = CAST(CONVERT(varchar(20), d.value, 121) + ' ' + CONVERT(varchar(20), t.value) AS datetime)
-	    FROM @tdates d CROSS JOIN @ttimes t)
-    , PreviousSchedule AS --Get the next expected schedule
-	(SELECT TOP(1)  schedule
-	FROM allScheduledTimes
-	WHERE schedule < GETDATE()
-	ORDER BY schedule DESC)
-
-	INSERT INTO @result(scheduledtime)
-	SELECT schedule
-	FROM PreviousSchedule
-
-	RETURN  
-
+	EXEC ('CREATE FUNCTION [cron].[GetNext] () RETURNS datetime AS BEGIN RETURN NULL END')
 END
 GO
-
-
-
 
 /*******************************************************************************
 --Copyright (c) 2022 Mikael Wedham (MIT License)
    -----------------------------------------
-   [cron].[GetNextSchedule]
+   [cron].[GetNext]
    -----------------------------------------
-   Gets the next run dates and times for this cron expression
-   The @MaxScheduleCount will return UP TO the maximum number
-   of rows, but it can return less.
+   Gets the next run date and time for this cron expression
+   with the starting point entered as parameter
 
    USAGE:
-   SELECT * FROM [cron].[GetNextSchedule]('* * * * *' , 5)                   --Each minute, Get 5 rows
-   SELECT * FROM [cron].[GetNextSchedule]('59 23 31 12 5', 1)                --One minute  before the end of year if the last day of the year is Friday
-   SELECT * FROM [cron].[GetNextSchedule]('45 17 7 6 * ', 2)                 --Every  year, on June 7th at 17:45 , Get 2 rows
-   SELECT * FROM [cron].[GetNextSchedule]('* / 15 * / 6 1,15,31 * 1-5', 10)  --At 00:00, 00:15, 00:30, 00:45, 06:00, 06:15, 06:30, 06:45, 12:00, 12:15, 12:30, 12:45, 18:00, 18:15, 18:30, 18:45, on 1st, 15th or  31st of each  month, but not on weekends , Get 10 rows
-   SELECT * FROM [cron].[GetNextSchedule]('0 12 * * 1-5', 14)                --At midday on weekdays, Get 14 rows
+   SELECT [cron].[GetNext]('* * * * *', '2022-02-20 18:00:00')   --Each minute, Get next schedule after 6PM on Feb 20th 2022.
+   SELECT [cron].[GetNext]('59 23 31 12 5',  NULL)               --Get next schedule from NOW One minute before the end of year if the last day of the year is Friday
+   SELECT [cron].[GetNext]('45 17 7 6 * ', NULL)                 --Every year, on June 7th at 17:45 , start date NOW
+   SELECT [cron].[GetNext]('0 12 * * 1-5', '2024-01-14')         --At midday on weekdays, returns Monday (on Sat & Sun)
+   SELECT [cron].[GetNext]('* /15 * /6 1,15,31 * 1-5', NULL)   --At 00:00, 00:15, 00:30, 00:45, 06:00, 06:15, 06:30, 06:45, 12:00, 12:15, 12:30, 12:45, 18:00, 18:15, 18:30, 18:45
+                                                                   , on 1st, 15th or  31st of each  month
+																   , but not on weekends , starting now
+																   --SPACES ADDED TO FIRST AND SECOND PARAMETER IN EXPRESSION DUE TO COMMENT ISSUES IN SQL
+																   -- REMOVE SPACE TO THE LEFT OF THE SLASH (/) TO MAKE THIS SAMPLE RUNNABLE
 
 Date		Name				Description
 ----------	-------------		-----------------------------------------------
 2022-01-04	Mikael Wedham		+Created v1
-2022-01-23	Mikael Wedham		+Edited for 2008+ compatibility
+2022-03-29	Mikael Wedham		+Added StartDate parameter to get a better view 
+                                on how delayed a schedule is.
+								@StartDate = NULL means that the function uses
+								GETDATE() to get the StartDate
+2023-11-27	Mikael Wedham		+Refactored for performance
+2024-01-17	Mikael Wedham		+Changed function to be a Scalar UDF
 *******************************************************************************/
-CREATE OR ALTER FUNCTION [cron].[GetNextSchedule]
-(@cron varchar(255), @MaxScheduleCount int) 
-RETURNS @result TABLE (scheduledtime datetime)
+ALTER FUNCTION [cron].[GetNext]
+(@cron varchar(255), @StartDate datetime = NULL) 
+RETURNS datetime
 AS
 BEGIN
-	DECLARE @nextschedule datetime
+	DECLARE @result datetime
 
-	--Create writable cron
-	DECLARE @cronexpression varchar(255)
-	SET @cronexpression = [cron].[NormalizeExpression](@cron)
-
-	DECLARE @minute varchar(255)
-	DECLARE @minutepos int
-	DECLARE @hour varchar(255)
-	DECLARE @hourpos int
-	DECLARE @dayofmonth varchar(255)
-	DECLARE @dayofmonthpos int
-	DECLARE @month varchar(255)
-	DECLARE @monthpos int
-	DECLARE @dayofweek varchar(255)
-
-	--Get positions of all parts 
-	SELECT @minutepos = CHARINDEX(' ', @cronexpression, 1) - 1
-	SELECT @hourpos = CHARINDEX(' ', @cronexpression, @minutepos+2) - 1
-	SELECT @dayofmonthpos = CHARINDEX(' ', @cronexpression, @hourpos+2) - 1
-	SELECT @monthpos = CHARINDEX(' ', @cronexpression, @dayofmonthpos+2) - 1
-
-	--Extract the different parts of the cron expression
-	SELECT @minute = SUBSTRING(@cronexpression, 1, @minutepos) 
-	, @hour = SUBSTRING(@cronexpression, @minutepos + 2, @hourpos-@minutepos) 
-	, @dayofmonth = SUBSTRING(@cronexpression,@hourpos + 2 , @dayofmonthpos-@hourpos) 
-	, @month = SUBSTRING(@cronexpression, @dayofmonthpos + 2, @monthpos-@dayofmonthpos) 
-	, @dayofweek = SUBSTRING(@cronexpression,@monthpos + 2, LEN(@cronexpression)-@monthpos+1) 
-
-		--Get a list of all minutes in the expression
-		DECLARE @tMinutes TABLE (value int)
-		INSERT @tMinutes (value) SELECT numbers FROM [cron].[internal_ParseField](@minute, 0, 59);
-
-		--Get a list of all hours in the expression
-		DECLARE @tHours TABLE (value int)
-		INSERT @tHours (value) SELECT numbers FROM [cron].[internal_ParseField](@hour, 0, 23);
-
-		--Get a list of all days of the month in the expression
-		DECLARE @tDays TABLE (value int)
-		INSERT @tDays (value) SELECT numbers FROM [cron].[internal_ParseField](@dayofmonth, 1, 31);
-
-		--Get a list of all months in the expression
-		DECLARE @tMonths TABLE (value int)
-		INSERT @tMonths (value) SELECT numbers FROM [cron].[internal_ParseField](@month, 1, 12);
-
-		--Get a list of all allowed days of the week in the expression
-		DECLARE @tWeekdays TABLE (value int)
-		INSERT @tWeekdays (value) SELECT numbers FROM [cron].[internal_ParseField](@dayofweek, 0, 7);
-
-		--Get a value in order to work with all DATEFIRST settings
-		DECLARE @deltaday int
-		SELECT @deltaday = @@DATEFIRST - 1
-
-	--Do not calculate more days than needed (rough estimate)
-	DECLARE @days int = 7
-	
-    --Contains all dates that should have at least one scheduled time
-	DECLARE @tdates TABLE (value date)
-	
-	WHILE (SELECT COUNT(*) FROM @tdates) <= @MaxScheduleCount OR @days > 2500000
+	IF (@StartDate IS NULL)
 	BEGIN
-		;WITH datenum AS --Get a number list for the estimated number of days
-			(SELECT number = 0 
-			   UNION ALL 
-			 SELECT number = number + 1 
-			 FROM datenum 
-			 WHERE number < @days)
-		,datesequence AS --Create the date list, with the last run date as the base.
-			(SELECT number
-				  , dt = DATEADD(DAY, number, GETDATE())
-			 FROM datenum )
-
-		--Get all the dates from the date list that match the date filter
-		--Modulo accounts for overflowing daynumbers if DATEFIRST > 1
-		INSERT INTO @tdates(value)
-		SELECT dates.dt 
-		FROM datesequence dates INNER JOIN @tMonths m ON m.value = DATEPART(MONTH, dates.dt) --Only get dates for the selected months
-			INNER JOIN @tDays d ON d.value = DATEPART(DAY, dates.dt) --Only get dates for the selected day of month
-			INNER JOIN @tWeekdays w ON w.value = (DATEPART(WEEKDAY, dates.dt) + @deltaday) % 7 --Only get dates for the selected day of week. 
-		option (maxrecursion 0)
-
-		SET @days = @days * 2
-    END
-
-	--Contains all scheduled times
-	DECLARE @ttimes TABLE (value time(0))
-
-	--Generate all time values, by combining all hours and all minutes
-	INSERT INTO @ttimes(value)
-	SELECT t = RIGHT('0' + CAST(h.value as varchar(2)), 2) + ':' + RIGHT('0' + CAST(m.value as varchar(2)), 2) + ':00'
-	FROM @tHours h CROSS JOIN @tMinutes m
-
-	;WITH allScheduledTimes AS --Generate datetime values for all dates and times
-	  ( SELECT schedule = CAST(CONVERT(varchar(20), d.value, 121) + ' ' + CONVERT(varchar(20), t.value) AS datetime)
-	    FROM @tdates d CROSS JOIN @ttimes t)
-    , NextSchedule AS --Get the next expected schedule
-	(SELECT DISTINCT schedule
-	FROM allScheduledTimes
-	WHERE schedule >= GETDATE()
-	)
-	INSERT INTO @result
-	SELECT TOP(@MaxScheduleCount) schedule
-	FROM NextSchedule
-    ORDER BY schedule
-
-RETURN  
-
-END
-GO
-
-
-/*******************************************************************************
---Copyright (c) 2022 Mikael Wedham (MIT License)
-   -----------------------------------------
-   [cron].[GetNextSchedule]
-   -----------------------------------------
-   Gets the next run dates and times for this cron expression
-   The @MaxScheduleCount will return UP TO the maximum number
-   of rows, but it can return less.
-
-   USAGE:
-   SELECT * FROM [cron].[GetNextScheduleAfter]('* * * * *', null )                            --Each minute
-   SELECT * FROM [cron].[GetNextScheduleAfter]('59 23 31 12 5', GETDATE())              --One minute  before the end of year if the last day of the year is Friday
-   SELECT * FROM [cron].[GetNextScheduleAfter]('45 17 7 6 * ', GETDATE())               --Every  year, on June 7th at 17:45
-   SELECT * FROM [cron].[GetNextScheduleAfter]('* / 15 * / 6 1,15,31 * 1-5', 10)        --At 00:00, 00:15, 00:30, 00:45, 06:00, 06:15, 06:30, 06:45, 12:00, 12:15, 12:30, 12:45, 18:00, 18:15, 18:30, 18:45, on 1st, 15th or  31st of each  month, but not on weekends
-   SELECT * FROM [cron].[GetNextScheduleAfter]('0 12 * * 1-5', '2020-01-10 14:00:00')   --At midday on weekdays
-
-Date		Name				Description
-----------	-------------		-----------------------------------------------
-2022-05-04	Mikael Wedham		+Created v1
-*******************************************************************************/
-CREATE OR ALTER   FUNCTION [cron].[GetNextScheduleAfter]
-(@cron varchar(255), @PreviousStartDate datetime = NULL) 
-RETURNS @result TABLE (scheduledtime datetime)
-AS
-BEGIN
-	IF (@PreviousStartDate IS NULL)
-	BEGIN
-		SET @PreviousStartDate = GETDATE()
+		SET @StartDate = GETDATE()
 	END
-
-	DECLARE @nextschedule datetime
+	
+	DECLARE @LastExec date
+	SET @LastExec = @StartDate
 
 	--Create writable cron
 	DECLARE @cronexpression varchar(255)
@@ -732,81 +758,69 @@ BEGIN
 
 		--Get a list of all minutes in the expression
 		DECLARE @tMinutes TABLE (value int)
-		INSERT @tMinutes (value) SELECT numbers FROM [cron].[internal_ParseField](@minute, 0, 59);
+		INSERT @tMinutes (value) SELECT number FROM [cron].[internal_ParseField](@minute, 0, 59);
 
 		--Get a list of all hours in the expression
 		DECLARE @tHours TABLE (value int)
-		INSERT @tHours (value) SELECT numbers FROM [cron].[internal_ParseField](@hour, 0, 23);
+		INSERT @tHours (value) SELECT number*60 FROM [cron].[internal_ParseField](@hour, 0, 23);
 
 		--Get a list of all days of the month in the expression
 		DECLARE @tDays TABLE (value int)
-		INSERT @tDays (value) SELECT numbers FROM [cron].[internal_ParseField](@dayofmonth, 1, 31);
+		INSERT @tDays (value) SELECT number FROM [cron].[internal_ParseField](@dayofmonth, 1, 31);
 
 		--Get a list of all months in the expression
 		DECLARE @tMonths TABLE (value int)
-		INSERT @tMonths (value) SELECT numbers FROM [cron].[internal_ParseField](@month, 1, 12);
+		INSERT @tMonths (value) SELECT number FROM [cron].[internal_ParseField](@month, 1, 12);
 
 		--Get a list of all allowed days of the week in the expression
 		DECLARE @tWeekdays TABLE (value int)
-		INSERT @tWeekdays (value) SELECT numbers FROM [cron].[internal_ParseField](@dayofweek, 0, 7);
+		INSERT @tWeekdays (value) SELECT number FROM [cron].[internal_ParseField](@dayofweek, 0, 7);
 
 		--Get a value in order to work with all DATEFIRST settings
 		DECLARE @deltaday int
 		SELECT @deltaday = @@DATEFIRST - 1
 
-	--Do not calculate more days than needed (rough estimate)
-	DECLARE @days int = 7
-	
     --Contains all dates that should have at least one scheduled time
 	DECLARE @tdates TABLE (value date)
-	
-	WHILE (SELECT COUNT(*) FROM @tdates) <= 10 OR @days > 2500000
-	BEGIN
-		;WITH datenum AS --Get a number list for the estimated number of days
-			(SELECT number = 0 
-			   UNION ALL 
-			 SELECT number = number + 1 
-			 FROM datenum 
-			 WHERE number < @days)
-		,datesequence AS --Create the date list, with the last run date as the base.
-			(SELECT number
-				  , dt = DATEADD(DAY, number, @PreviousStartDate)
-			 FROM datenum )
 
-		--Get all the dates from the date list that match the date filter
-		--Modulo accounts for overflowing daynumbers if DATEFIRST > 1
-		INSERT INTO @tdates(value)
-		SELECT dates.dt 
-		FROM datesequence dates INNER JOIN @tMonths m ON m.value = DATEPART(MONTH, dates.dt) --Only get dates for the selected months
-			INNER JOIN @tDays d ON d.value = DATEPART(DAY, dates.dt) --Only get dates for the selected day of month
-			INNER JOIN @tWeekdays w ON w.value = (DATEPART(WEEKDAY, dates.dt) + @deltaday) % 7 --Only get dates for the selected day of week. 
-		option (maxrecursion 0)
-
-		SET @days = @days * 2
-    END
-
-	--Contains all scheduled times
-	DECLARE @ttimes TABLE (value time(0))
-
-	--Generate all time values, by combining all hours and all minutes
-	INSERT INTO @ttimes(value)
-	SELECT t = RIGHT('0' + CAST(h.value as varchar(2)), 2) + ':' + RIGHT('0' + CAST(m.value as varchar(2)), 2) + ':00'
-	FROM @tHours h CROSS JOIN @tMinutes m
+	INSERT INTO @tdates(value)
+	SELECT TOP(2) dates.datevalue 
+	FROM cron.Dates dates INNER JOIN @tMonths m ON m.value = dates.monthvalue --Only get dates for the selected months
+		INNER JOIN @tDays d ON d.value = dates.dayvalue --Only get dates for the selected day of month
+		INNER JOIN @tWeekdays w ON w.value = dates.weekdayvalue --Only get dates for the selected day of week.
+	WHERE dates.datevalue >= @LastExec
+	ORDER BY dates.datevalue
 
 	;WITH allScheduledTimes AS --Generate datetime values for all dates and times
-	  ( SELECT schedule = CAST(CONVERT(varchar(20), d.value, 121) + ' ' + CONVERT(varchar(20), t.value) AS datetime)
-	    FROM @tdates d CROSS JOIN @ttimes t)
+	  ( SELECT schedule = DATEADD(MINUTE, (hh.value + mm.value), CAST(d.value as datetime))
+	    FROM @tdates d CROSS JOIN @tHours hh CROSS JOIN @tMinutes mm)
     , NextSchedule AS --Get the next expected schedule
 	(SELECT DISTINCT schedule
 	FROM allScheduledTimes
-	WHERE schedule > @PreviousStartDate
+	WHERE schedule >= @StartDate
 	)
-	INSERT INTO @result
-	SELECT TOP(1) schedule
+	SELECT @result = MIN(schedule)
 	FROM NextSchedule
-    ORDER BY schedule
 
-RETURN  
+RETURN  @result
 
 END
 GO
+
+
+
+/****** Section:  User Defined Functions ******/
+
+--==================================================================================================================
+--==================================================================================================================
+--==================================================================================================================
+
+/****** Section:  Data Initialization ******/
+SET NOCOUNT OFF
+GO
+
+EXEC [cron].[FillNumbers]
+GO
+EXEC [cron].[FillDates]
+GO
+/****** Section:  Data Initialization ******/
